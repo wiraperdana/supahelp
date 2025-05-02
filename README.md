@@ -582,29 +582,6 @@ For very large databases:
 - Be careful when sharing SQL files as they may contain sensitive data.
 - For production environments, consider using a secrets management solution instead of environment variables.
 
-## Publishing to npm
-
-If you want to publish this package to npm, follow these steps:
-
-1. Make sure you have an npm account and are logged in:
-   ```bash
-   npm login
-   ```
-
-2. Update the package.json file with your information:
-   - Update the "author" field with your name and email
-   - Consider updating the "license" field if needed
-   - Add a "repository" field pointing to your GitHub repository
-
-3. Publish the package:
-   ```bash
-   npm publish
-   ```
-
-4. To update the package later:
-   - Update the version in package.json (follow semantic versioning)
-   - Run `npm publish` again
-
 ## Contributing
 
 Feel free to modify this script to suit your specific needs. Some potential improvements:
