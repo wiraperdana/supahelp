@@ -1,0 +1,12 @@
+# Ignore files not needed in the npm package
+*.sql
+*.csv
+node_modules/
+.git/
+.github/
+.gitignore
+.DS_Store
+*.log
+*.tmp
+*.temp
+*.bak

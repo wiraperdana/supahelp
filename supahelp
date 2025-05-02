@@ -1,0 +1,811 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const { Pool } = require('pg');
+const readline = require('readline');
+
+// Connection string for Supabase from environment variable
+// Default connection string is used if SUPABASE_CONNECTION_STRING is not set
+const connectionString = process.env.SUPABASE_CONNECTION_STRING || 'postgresql://postgres:password@localhost:5432/postgres';
+
+// ANSI color codes for terminal output
+const colors = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  dim: '\x1b[2m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m',
+};
+
+// Create a new pool
+const pool = new Pool({
+  connectionString: connectionString,
+});
+
+// Handle pool connection errors
+pool.on('error', (err) => {
+  console.error(`${colors.red}Database connection error: ${err.message}${colors.reset}`);
+  console.error(`${colors.yellow}Please check your database connection settings.${colors.reset}`);
+  console.error(`${colors.yellow}To set the connection string, use the SUPABASE_CONNECTION_STRING environment variable:${colors.reset}`);
+  console.error(`${colors.yellow}export SUPABASE_CONNECTION_STRING='postgresql://postgres:password@your-supabase-host:5432/postgres'${colors.reset}`);
+  console.error(`${colors.yellow}Make sure your database is running and accessible.${colors.reset}`);
+  process.exit(1);
+});
+
+/**
+ * Import SQL file to Supabase
+ * @param {string} filePath - Path to SQL file
+ */
+async function importSQL(filePath) {
+  if (!filePath) {
+    console.error(`${colors.red}Error: No SQL file specified${colors.reset}`);
+    console.log(`Usage: supahelp import <file.sql>`);
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(filePath)) {
+    console.error(`${colors.red}Error: File '${filePath}' not found${colors.reset}`);
+    process.exit(1);
+  }
+
+  let client = null;
+
+  try {
+    // Connect to the database
+    client = await pool.connect();
+    console.log(`${colors.green}Connected to Supabase database${colors.reset}`);
+
+    // Read the SQL file
+    const sqlContent = fs.readFileSync(filePath, 'utf8');
+
+    // Format file size in appropriate units
+    const fileSizeInBytes = sqlContent.length;
+    let fileSizeStr;
+    if (fileSizeInBytes < 1024) {
+      fileSizeStr = `${fileSizeInBytes} bytes`;
+    } else if (fileSizeInBytes < 1024 * 1024) {
+      fileSizeStr = `${(fileSizeInBytes / 1024).toFixed(2)} KB`;
+    } else {
+      fileSizeStr = `${(fileSizeInBytes / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    console.log(`${colors.blue}Read ${fileSizeStr} from ${filePath}${colors.reset}`);
+
+    // Check if the file contains SQL statements
+    const insertCount = (sqlContent.match(/INSERT INTO/gi) || []).length;
+    const deleteCount = (sqlContent.match(/DELETE FROM/gi) || []).length;
+    const truncateCount = (sqlContent.match(/TRUNCATE TABLE/gi) || []).length;
+    const updateCount = (sqlContent.match(/UPDATE /gi) || []).length;
+    const createCount = (sqlContent.match(/CREATE TABLE/gi) || []).length;
+    const dropCount = (sqlContent.match(/DROP TABLE/gi) || []).length;
+    const alterCount = (sqlContent.match(/ALTER TABLE/gi) || []).length;
+
+    const totalStatements = insertCount + deleteCount + truncateCount + updateCount + createCount + dropCount + alterCount;
+
+    console.log(`${colors.blue}Found approximately:${colors.reset}`);
+    if (insertCount > 0) console.log(`${colors.blue}- ${insertCount} INSERT statements${colors.reset}`);
+    if (deleteCount > 0) console.log(`${colors.blue}- ${deleteCount} DELETE statements${colors.reset}`);
+    if (truncateCount > 0) console.log(`${colors.blue}- ${truncateCount} TRUNCATE statements${colors.reset}`);
+    if (updateCount > 0) console.log(`${colors.blue}- ${updateCount} UPDATE statements${colors.reset}`);
+    if (createCount > 0) console.log(`${colors.blue}- ${createCount} CREATE TABLE statements${colors.reset}`);
+    if (dropCount > 0) console.log(`${colors.blue}- ${dropCount} DROP TABLE statements${colors.reset}`);
+    if (alterCount > 0) console.log(`${colors.blue}- ${alterCount} ALTER TABLE statements${colors.reset}`);
+
+    // Ask for confirmation before proceeding
+    if (totalStatements > 0) {
+      const answer = await askQuestion(`${colors.yellow}Are you sure you want to execute these statements? (y/n): ${colors.reset}`);
+      if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+        console.log(`${colors.yellow}Import cancelled${colors.reset}`);
+        process.exit(0);
+      }
+    } else {
+      console.log(`${colors.yellow}No SQL statements found in the file.${colors.reset}`);
+      const answer = await askQuestion(`${colors.yellow}Continue anyway? (y/n): ${colors.reset}`);
+      if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+        console.log(`${colors.yellow}Import cancelled${colors.reset}`);
+        process.exit(0);
+      }
+    }
+
+    // Execute the SQL statements
+    console.log(`${colors.yellow}Importing data...${colors.reset}`);
+
+    // Begin transaction
+    await client.query('BEGIN');
+
+    // Process the SQL file directly
+    console.log(`${colors.yellow}Executing SQL file directly...${colors.reset}`);
+
+    try {
+      // Execute the entire SQL file as a single query
+      await client.query(sqlContent);
+      console.log(`${colors.green}SQL file executed successfully${colors.reset}`);
+
+      // Commit transaction
+      await client.query('COMMIT');
+
+      // Count executed statements by type
+      const insertCount = (sqlContent.match(/INSERT INTO/gi) || []).length;
+      const deleteCount = (sqlContent.match(/DELETE FROM/gi) || []).length;
+      const truncateCount = (sqlContent.match(/TRUNCATE TABLE/gi) || []).length;
+      const updateCount = (sqlContent.match(/UPDATE /gi) || []).length;
+      const createCount = (sqlContent.match(/CREATE TABLE/gi) || []).length;
+      const dropCount = (sqlContent.match(/DROP TABLE/gi) || []).length;
+      const alterCount = (sqlContent.match(/ALTER TABLE/gi) || []).length;
+
+      // Show detailed success counts
+      console.log(`${colors.green}Successful statements by type:${colors.reset}`);
+      if (insertCount > 0) console.log(`${colors.green}- INSERT: ${insertCount}${colors.reset}`);
+      if (deleteCount > 0) console.log(`${colors.green}- DELETE: ${deleteCount}${colors.reset}`);
+      if (truncateCount > 0) console.log(`${colors.green}- TRUNCATE: ${truncateCount}${colors.reset}`);
+      if (updateCount > 0) console.log(`${colors.green}- UPDATE: ${updateCount}${colors.reset}`);
+      if (createCount > 0) console.log(`${colors.green}- CREATE TABLE: ${createCount}${colors.reset}`);
+      if (dropCount > 0) console.log(`${colors.green}- DROP TABLE: ${dropCount}${colors.reset}`);
+      if (alterCount > 0) console.log(`${colors.green}- ALTER TABLE: ${alterCount}${colors.reset}`);
+
+      return;
+    } catch (err) {
+      console.error(`${colors.red}Error executing SQL file directly: ${err.message}${colors.reset}`);
+      console.log(`${colors.yellow}Falling back to statement-by-statement execution...${colors.reset}`);
+
+      // Rollback the failed transaction
+      await client.query('ROLLBACK');
+
+      // Begin a new transaction
+      await client.query('BEGIN');
+    }
+
+    // Split the SQL file into individual statements
+    // This regex handles SQL statements that end with semicolons but ignores semicolons inside quotes
+    const statements = sqlContent.split(';').filter(stmt => stmt.trim().length > 0);
+
+    // Execute each statement
+    let successCount = 0;
+    let errorCount = 0;
+    let insertSuccessCount = 0;
+    let deleteSuccessCount = 0;
+    let truncateSuccessCount = 0;
+    let updateSuccessCount = 0;
+    let createSuccessCount = 0;
+    let dropSuccessCount = 0;
+    let alterSuccessCount = 0;
+    let otherSuccessCount = 0;
+
+    for (let i = 0; i < statements.length; i++) {
+      const stmt = statements[i].trim() + ';';
+      if (stmt.length <= 1 || stmt.startsWith('--')) continue;
+
+      try {
+        await client.query(stmt);
+        successCount++;
+
+        // Count by statement type
+        if (stmt.toUpperCase().includes('INSERT INTO')) {
+          insertSuccessCount++;
+        } else if (stmt.toUpperCase().includes('DELETE FROM')) {
+          deleteSuccessCount++;
+        } else if (stmt.toUpperCase().includes('TRUNCATE TABLE')) {
+          truncateSuccessCount++;
+        } else if (stmt.toUpperCase().includes('UPDATE ')) {
+          updateSuccessCount++;
+        } else if (stmt.toUpperCase().includes('CREATE TABLE')) {
+          createSuccessCount++;
+        } else if (stmt.toUpperCase().includes('DROP TABLE')) {
+          dropSuccessCount++;
+        } else if (stmt.toUpperCase().includes('ALTER TABLE')) {
+          alterSuccessCount++;
+        } else {
+          otherSuccessCount++;
+        }
+
+        if (successCount % 100 === 0) {
+          process.stdout.write(`${colors.green}Processed ${successCount} statements\r${colors.reset}`);
+        }
+      } catch (err) {
+        errorCount++;
+        console.error(`${colors.red}Error executing statement ${i + 1}: ${err.message}${colors.reset}`);
+
+        // Log the problematic statement for debugging
+        console.error(`${colors.dim}Statement: ${stmt.substring(0, 100)}...${colors.reset}`);
+
+        // Ask whether to continue or rollback
+        if (errorCount === 1) {
+          const answer = await askQuestion(`${colors.yellow}Continue despite errors? (y/n): ${colors.reset}`);
+          if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+            console.log(`${colors.yellow}Rolling back transaction...${colors.reset}`);
+            await client.query('ROLLBACK');
+            console.log(`${colors.yellow}Import cancelled${colors.reset}`);
+            process.exit(1);
+          }
+        }
+      }
+    }
+
+    // Commit transaction
+    await client.query('COMMIT');
+
+    console.log(`\n${colors.green}Import completed: ${successCount} successful, ${errorCount} errors${colors.reset}`);
+
+    // Show detailed success counts
+    if (successCount > 0) {
+      console.log(`${colors.green}Successful statements by type:${colors.reset}`);
+      if (insertSuccessCount > 0) console.log(`${colors.green}- INSERT: ${insertSuccessCount}${colors.reset}`);
+      if (deleteSuccessCount > 0) console.log(`${colors.green}- DELETE: ${deleteSuccessCount}${colors.reset}`);
+      if (truncateSuccessCount > 0) console.log(`${colors.green}- TRUNCATE: ${truncateSuccessCount}${colors.reset}`);
+      if (updateSuccessCount > 0) console.log(`${colors.green}- UPDATE: ${updateSuccessCount}${colors.reset}`);
+      if (createSuccessCount > 0) console.log(`${colors.green}- CREATE TABLE: ${createSuccessCount}${colors.reset}`);
+      if (dropSuccessCount > 0) console.log(`${colors.green}- DROP TABLE: ${dropSuccessCount}${colors.reset}`);
+      if (alterSuccessCount > 0) console.log(`${colors.green}- ALTER TABLE: ${alterSuccessCount}${colors.reset}`);
+      if (otherSuccessCount > 0) console.log(`${colors.green}- Other: ${otherSuccessCount}${colors.reset}`);
+    }
+
+  } catch (err) {
+    console.error(`${colors.red}Error: ${err.message}${colors.reset}`);
+
+    // Check if it's a connection error
+    if (err.code === 'ECONNREFUSED' || err.code === '28P01' || err.code === '3D000' || err.message.includes('connect')) {
+      console.error(`${colors.yellow}Database connection error. Please check your connection settings.${colors.reset}`);
+      console.error(`${colors.yellow}To set the connection string, use the SUPABASE_CONNECTION_STRING environment variable:${colors.reset}`);
+      console.error(`${colors.yellow}export SUPABASE_CONNECTION_STRING='postgresql://postgres:password@your-supabase-host:5432/postgres'${colors.reset}`);
+      console.error(`${colors.yellow}Make sure your database is running and accessible.${colors.reset}`);
+    } else {
+      // Rollback transaction if client exists
+      if (client) {
+        try {
+          await client.query('ROLLBACK');
+          console.log(`${colors.yellow}Transaction rolled back${colors.reset}`);
+        } catch (rollbackErr) {
+          console.error(`${colors.red}Error rolling back transaction: ${rollbackErr.message}${colors.reset}`);
+        }
+      }
+    }
+
+    process.exit(1);
+  } finally {
+    if (client) {
+      client.release();
+    }
+
+    await pool.end();
+  }
+}
+
+/**
+ * Dump Supabase database to SQL file
+ * @param {string} outputFile - Output file path (optional)
+ * @param {Object} options - Additional options
+ * @param {boolean} options.schemaOnly - Whether to dump only the schema without data
+ * @param {string} options.table - Specific table to dump (if not provided, dumps all tables)
+ */
+async function dumpDatabase(outputFile, options = {}) {
+  // Generate default output filename if not provided
+  if (!outputFile) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').split('Z')[0];
+    let filePrefix = options.schemaOnly ? 'supabase_schema_' : 'supabase_dump_';
+
+    // If dumping a specific table, include the table name in the filename
+    if (options.table) {
+      filePrefix = options.table + '_' + filePrefix;
+    }
+
+    outputFile = `${filePrefix}${timestamp}.sql`;
+  }
+
+  let client = null;
+
+  try {
+    // Connect to the database
+    client = await pool.connect();
+    console.log(`${colors.green}Connected to Supabase database${colors.reset}`);
+
+    // Get tables to process
+    let tables = [];
+
+    if (options.table) {
+      // Check if the specified table exists
+      const tableExistsResult = await client.query(`
+        SELECT EXISTS (
+          SELECT 1
+          FROM information_schema.tables
+          WHERE table_schema = 'public'
+          AND table_name = $1
+        ) AS exists
+      `, [options.table]);
+
+      if (!tableExistsResult.rows[0].exists) {
+        console.error(`${colors.red}Error: Table '${options.table}' does not exist${colors.reset}`);
+        process.exit(1);
+      }
+
+      tables = [options.table];
+      console.log(`${colors.blue}Dumping single table: ${options.table}${colors.reset}`);
+    } else {
+      // Get all user tables (excluding system tables)
+      const tablesResult = await client.query(`
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+      `);
+
+      tables = tablesResult.rows.map(row => row.table_name);
+      console.log(`${colors.blue}Found ${tables.length} tables: ${tables.join(', ')}${colors.reset}`);
+    }
+
+    // Create the SQL file
+    const writeStream = fs.createWriteStream(outputFile);
+
+    // Write header
+    writeStream.write('-- Supabase database dump\n');
+    if (options.schemaOnly) {
+      writeStream.write('-- Schema only (no data)\n');
+    }
+    if (options.table) {
+      writeStream.write(`-- Table: ${options.table}\n`);
+    }
+    writeStream.write(`-- Generated on ${new Date().toISOString()}\n\n`);
+
+    // Process each table
+    for (const tableName of tables) {
+      console.log(`${colors.yellow}Processing table: ${tableName}${colors.reset}`);
+
+      // Get the table structure
+      const tableInfoResult = await client.query(`
+        SELECT column_name, data_type, character_maximum_length,
+               is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_name = $1
+        ORDER BY ordinal_position
+      `, [tableName]);
+
+      const columns = tableInfoResult.rows.map(row => row.column_name);
+
+      // Write DROP TABLE statement
+      writeStream.write(`-- Table: ${tableName}\n`);
+      writeStream.write(`DROP TABLE IF EXISTS ${tableName} CASCADE;\n\n`);
+
+      // Write CREATE TABLE statement
+      writeStream.write(`CREATE TABLE ${tableName} (\n`);
+      tableInfoResult.rows.forEach((col, index) => {
+        let dataType = col.data_type;
+        if (col.character_maximum_length) {
+          dataType += `(${col.character_maximum_length})`;
+        }
+
+        const nullable = col.is_nullable === 'YES' ? '' : ' NOT NULL';
+        const defaultVal = col.column_default ? ` DEFAULT ${col.column_default}` : '';
+        const comma = index < tableInfoResult.rows.length - 1 ? ',' : '';
+
+        writeStream.write(`  ${col.column_name} ${dataType}${nullable}${defaultVal}${comma}\n`);
+      });
+      writeStream.write(');\n\n');
+
+      // Get primary key info
+      try {
+        const pkResult = await client.query(`
+          SELECT a.attname
+          FROM pg_index i
+          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+          WHERE i.indrelid = $1::regclass
+          AND i.indisprimary
+        `, [tableName]);
+
+        if (pkResult.rows.length > 0) {
+          const pkColumns = pkResult.rows.map(row => row.attname);
+          writeStream.write(`ALTER TABLE ${tableName} ADD PRIMARY KEY (${pkColumns.join(', ')});\n\n`);
+        }
+      } catch (err) {
+        console.error(`${colors.red}Error getting primary key for ${tableName}: ${err.message}${colors.reset}`);
+      }
+
+      // Get all data from the table (skip if schema-only)
+      if (!options.schemaOnly) {
+        try {
+          const dataResult = await client.query(`SELECT * FROM ${tableName}`);
+          console.log(`${colors.blue}Found ${dataResult.rows.length} rows in ${tableName}${colors.reset}`);
+
+          // Write INSERT statements
+          if (dataResult.rows.length > 0) {
+            writeStream.write(`-- Data for table: ${tableName}\n`);
+
+            dataResult.rows.forEach(row => {
+              const values = columns.map(col => {
+                const value = row[col];
+                if (value === null) return 'NULL';
+                if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`;
+                if (typeof value === 'object' && value instanceof Date) {
+                  return `'${value.toISOString()}'`;
+                }
+                if (typeof value === 'object') {
+                  return `'${JSON.stringify(value).replace(/'/g, "''")}'`;
+                }
+                return value;
+              });
+
+              writeStream.write(`INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${values.join(', ')});\n`);
+            });
+
+            writeStream.write('\n');
+          }
+        } catch (err) {
+          console.error(`${colors.red}Error getting data from ${tableName}: ${err.message}${colors.reset}`);
+          writeStream.write(`-- Error getting data from ${tableName}: ${err.message}\n\n`);
+        }
+      } else {
+        console.log(`${colors.blue}Skipping data for ${tableName} (schema-only mode)${colors.reset}`);
+      }
+    }
+
+    // Close the file
+    writeStream.end();
+
+    // Wait for the stream to finish before calculating file size
+    await new Promise((resolve) => {
+      writeStream.on('finish', resolve);
+    });
+
+    // Get file size
+    const stats = fs.statSync(outputFile);
+    const fileSizeInBytes = stats.size;
+
+    // Format file size in appropriate units
+    let fileSizeStr;
+    if (fileSizeInBytes < 1024) {
+      fileSizeStr = `${fileSizeInBytes} bytes`;
+    } else if (fileSizeInBytes < 1024 * 1024) {
+      fileSizeStr = `${(fileSizeInBytes / 1024).toFixed(2)} KB`;
+    } else {
+      fileSizeStr = `${(fileSizeInBytes / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    console.log(`${colors.green}Dump completed successfully!${colors.reset}`);
+    console.log(`${colors.green}File saved as: ${outputFile} (${fileSizeStr})${colors.reset}`);
+
+  } catch (err) {
+    console.error(`${colors.red}Error: ${err.message}${colors.reset}`);
+
+    // Check if it's a connection error
+    if (err.code === 'ECONNREFUSED' || err.code === '28P01' || err.code === '3D000' || err.message.includes('connect')) {
+      console.error(`${colors.yellow}Database connection error. Please check your connection settings.${colors.reset}`);
+      console.error(`${colors.yellow}To set the connection string, use the SUPABASE_CONNECTION_STRING environment variable:${colors.reset}`);
+      console.error(`${colors.yellow}export SUPABASE_CONNECTION_STRING='postgresql://postgres:password@your-supabase-host:5432/postgres'${colors.reset}`);
+      console.error(`${colors.yellow}Make sure your database is running and accessible.${colors.reset}`);
+    }
+
+    process.exit(1);
+  } finally {
+    if (client) {
+      client.release();
+    }
+
+    await pool.end();
+  }
+}
+
+/**
+ * Ask a question and get user input
+ * @param {string} question - Question to ask
+ * @returns {Promise<string>} - User's answer
+ */
+function askQuestion(question) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  return new Promise(resolve => {
+    rl.question(question, answer => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+/**
+ * Show help message
+ */
+function showHelp() {
+  console.log(`
+${colors.bright}Supabase Helper${colors.reset}
+A utility for importing and exporting data to/from Supabase
+
+${colors.bright}Usage:${colors.reset}
+  supahelp <command> [options]
+
+${colors.bright}Commands:${colors.reset}
+  ${colors.green}import <file.sql>${colors.reset}    Import SQL file to Supabase
+  ${colors.green}dump [options] [output_file.sql]${colors.reset}  Dump Supabase database to SQL file
+  ${colors.green}query [options] <sql_query>${colors.reset}  Execute SQL query from string and display results
+  ${colors.green}query [options] <file.sql>${colors.reset}  Execute SQL query from file and display results
+  ${colors.green}help${colors.reset}                 Show this help message
+
+${colors.bright}Options for dump:${colors.reset}
+  ${colors.green}--schema-only${colors.reset}        Dump only the database schema without data
+  ${colors.green}--table <table_name>${colors.reset} Dump only the specified table
+
+${colors.bright}Options for query:${colors.reset}
+  ${colors.green}--csv${colors.reset}                Output results in CSV format
+
+${colors.bright}Examples:${colors.reset}
+  supahelp import siswa_data.sql
+  supahelp dump
+  supahelp dump my_backup.sql
+  supahelp dump --schema-only
+  supahelp dump --schema-only schema_only.sql
+  supahelp dump --table siswa
+  supahelp dump --table siswa siswa_backup.sql
+  supahelp dump --table siswa --schema-only
+  supahelp query "SELECT * FROM siswa LIMIT 10"
+  supahelp query --csv "SELECT * FROM siswa LIMIT 10"
+  supahelp query query.sql
+  supahelp query --csv query.sql
+
+${colors.bright}Connection:${colors.reset}
+  Currently using: ${connectionString}
+  To change the connection string, set the SUPABASE_CONNECTION_STRING environment variable:
+
+  ${colors.bright}Example:${colors.reset}
+  export SUPABASE_CONNECTION_STRING='postgresql://postgres:password@your-supabase-host:5432/postgres'
+
+  If SUPABASE_CONNECTION_STRING is not set, a default local connection string will be used.
+  `);
+}
+
+/**
+ * Read SQL query from a file
+ * @param {string} filePath - Path to the SQL file
+ * @returns {Promise<string>} - The SQL query string
+ */
+async function readQueryFromFile(filePath) {
+  try {
+    // Check if the file exists
+    if (!fs.existsSync(filePath)) {
+      console.error(`${colors.red}Error: File not found: ${filePath}${colors.reset}`);
+      process.exit(1);
+    }
+
+    // Read the file
+    const query = fs.readFileSync(filePath, 'utf8');
+
+    if (!query || query.trim() === '') {
+      console.error(`${colors.red}Error: File is empty: ${filePath}${colors.reset}`);
+      process.exit(1);
+    }
+
+    return query;
+  } catch (err) {
+    console.error(`${colors.red}Error reading file: ${err.message}${colors.reset}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Execute a SQL query and display the results
+ * @param {string} queryStringOrFile - SQL query string or file path
+ * @param {Object} options - Additional options
+ * @param {boolean} options.csv - Whether to output in CSV format
+ * @param {boolean} options.fromFile - Whether the query is from a file
+ */
+async function executeQuery(queryStringOrFile, options = {}) {
+  let queryString;
+
+  if (options.fromFile) {
+    // Read query from file
+    queryString = await readQueryFromFile(queryStringOrFile);
+    console.log(`${colors.blue}Loaded query from file: ${queryStringOrFile}${colors.reset}`);
+  } else {
+    // Use the provided query string
+    queryString = queryStringOrFile;
+  }
+
+  if (!queryString) {
+    console.error(`${colors.red}Error: No SQL query specified${colors.reset}`);
+    console.log(`Usage: supahelp query "SELECT * FROM table_name"`);
+    console.log(`   or: supahelp query query.sql`);
+    process.exit(1);
+  }
+
+  let client = null;
+
+  try {
+    // Connect to the database
+    client = await pool.connect();
+    console.log(`${colors.green}Connected to Supabase database${colors.reset}`);
+
+    // Execute the query
+    console.log(`${colors.blue}Executing query...${colors.reset}`);
+    const startTime = Date.now();
+    const result = await client.query(queryString);
+    const endTime = Date.now();
+    const executionTime = (endTime - startTime) / 1000;
+
+    // Display the results
+    if (result.rows.length === 0) {
+      console.log(`${colors.yellow}Query returned no rows${colors.reset}`);
+      console.log(`${colors.blue}Execution time: ${executionTime.toFixed(2)} seconds${colors.reset}`);
+      return;
+    }
+
+    console.log(`${colors.green}Query returned ${result.rows.length} rows${colors.reset}`);
+    console.log(`${colors.blue}Execution time: ${executionTime.toFixed(2)} seconds${colors.reset}`);
+
+    // Get column names
+    const columns = Object.keys(result.rows[0]);
+
+    if (options.csv) {
+      // Output in CSV format
+      console.log(columns.join(','));
+      result.rows.forEach(row => {
+        const values = columns.map(col => {
+          const value = row[col];
+          if (value === null) return '';
+          if (typeof value === 'string') return `"${value.replace(/"/g, '""')}"`;
+          if (typeof value === 'object' && value instanceof Date) {
+            return `"${value.toISOString()}"`;
+          }
+          if (typeof value === 'object') {
+            return `"${JSON.stringify(value).replace(/"/g, '""')}"`;
+          }
+          return value;
+        });
+        console.log(values.join(','));
+      });
+    } else {
+      // Calculate column widths for pretty printing
+      const columnWidths = {};
+      columns.forEach(col => {
+        // Start with the column name length
+        columnWidths[col] = col.length;
+
+        // Check each row for this column
+        result.rows.forEach(row => {
+          const value = row[col];
+          const valueStr = value === null ? 'NULL' :
+                          (typeof value === 'object' ? JSON.stringify(value) : String(value));
+          columnWidths[col] = Math.max(columnWidths[col], valueStr.length);
+        });
+
+        // Cap the width at 50 characters
+        columnWidths[col] = Math.min(columnWidths[col], 50);
+      });
+
+      // Print header
+      const header = columns.map(col => col.padEnd(columnWidths[col])).join(' | ');
+      const separator = columns.map(col => '-'.repeat(columnWidths[col])).join('-+-');
+      console.log(`\n${colors.cyan}${header}${colors.reset}`);
+      console.log(`${colors.cyan}${separator}${colors.reset}`);
+
+      // Print rows
+      result.rows.forEach(row => {
+        const rowStr = columns.map(col => {
+          const value = row[col];
+          let valueStr = value === null ? 'NULL' :
+                        (typeof value === 'object' ? JSON.stringify(value) : String(value));
+
+          // Truncate long values
+          if (valueStr.length > columnWidths[col]) {
+            valueStr = valueStr.substring(0, columnWidths[col] - 3) + '...';
+          }
+
+          return valueStr.padEnd(columnWidths[col]);
+        }).join(' | ');
+        console.log(rowStr);
+      });
+      console.log('');
+    }
+
+  } catch (err) {
+    console.error(`${colors.red}Error executing query: ${err.message}${colors.reset}`);
+
+    // Check if it's a connection error
+    if (err.code === 'ECONNREFUSED' || err.code === '28P01' || err.code === '3D000' || err.message.includes('connect')) {
+      console.error(`${colors.yellow}Database connection error. Please check your connection settings.${colors.reset}`);
+      console.error(`${colors.yellow}To set the connection string, use the SUPABASE_CONNECTION_STRING environment variable:${colors.reset}`);
+      console.error(`${colors.yellow}export SUPABASE_CONNECTION_STRING='postgresql://postgres:password@your-supabase-host:5432/postgres'${colors.reset}`);
+      console.error(`${colors.yellow}Make sure your database is running and accessible.${colors.reset}`);
+    }
+
+    process.exit(1);
+  } finally {
+    if (client) {
+      client.release();
+    }
+
+    await pool.end();
+  }
+}
+
+/**
+ * Main function
+ */
+async function main() {
+  const args = process.argv.slice(2);
+  const command = args[0];
+
+  if (!command || command === 'help' || command === '--help' || command === '-h') {
+    showHelp();
+    process.exit(0);
+  }
+
+  switch (command.toLowerCase()) {
+    case 'import':
+      await importSQL(args[1]);
+      break;
+    case 'dump': {
+      // Check for flags
+      const schemaOnly = args.includes('--schema-only');
+      const tableIndex = args.indexOf('--table');
+      const hasTableFlag = tableIndex !== -1 && tableIndex + 1 < args.length;
+      const table = hasTableFlag ? args[tableIndex + 1] : null;
+
+      // Create a filtered args array without the flags and their values
+      let filteredArgs = [...args];
+      if (schemaOnly) {
+        filteredArgs = filteredArgs.filter(arg => arg !== '--schema-only');
+      }
+      if (hasTableFlag) {
+        filteredArgs = filteredArgs.filter((_, index) =>
+          index !== tableIndex && index !== tableIndex + 1
+        );
+      }
+
+      // Get the output file (first argument after command and flags)
+      const outputFile = filteredArgs.length > 1 ? filteredArgs[1] : null;
+
+      await dumpDatabase(outputFile, { schemaOnly, table });
+      break;
+    }
+    case 'query': {
+      // Check for --csv flag
+      const csv = args.includes('--csv');
+      // Remove the flag from args if present to get the query
+      const queryArgs = args.filter(arg => arg !== '--csv').slice(1);
+
+      if (queryArgs.length === 0) {
+        console.error(`${colors.red}Error: No SQL query or file specified${colors.reset}`);
+        console.log(`Usage: supahelp query "SELECT * FROM table_name"`);
+        console.log(`   or: supahelp query query.sql`);
+        process.exit(1);
+      }
+
+      // Check if the first argument is a file path
+      const firstArg = queryArgs[0];
+      const isFilePath = firstArg.endsWith('.sql') && queryArgs.length === 1;
+
+      if (isFilePath) {
+        // Execute query from file
+        await executeQuery(firstArg, { csv, fromFile: true });
+      } else {
+        // Execute query from command line
+        const queryString = queryArgs.join(' ');
+        await executeQuery(queryString, { csv, fromFile: false });
+      }
+      break;
+    }
+    default:
+      console.error(`${colors.red}Unknown command: ${command}${colors.reset}`);
+      showHelp();
+      process.exit(1);
+  }
+}
+
+// Run the main function
+main().catch(err => {
+  console.error(`${colors.red}Unhandled error: ${err.message}${colors.reset}`);
+
+  // Check if it's a connection error
+  if (err.code === 'ECONNREFUSED' || err.code === '28P01' || err.code === '3D000' || err.message.includes('connect')) {
+    console.error(`${colors.yellow}Database connection error. Please check your connection settings.${colors.reset}`);
+    console.error(`${colors.yellow}To set the connection string, use the SUPABASE_CONNECTION_STRING environment variable:${colors.reset}`);
+    console.error(`${colors.yellow}export SUPABASE_CONNECTION_STRING='postgresql://postgres:password@your-supabase-host:5432/postgres'${colors.reset}`);
+    console.error(`${colors.yellow}Make sure your database is running and accessible.${colors.reset}`);
+  }
+
+  process.exit(1);
+});

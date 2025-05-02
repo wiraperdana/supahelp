@@ -1,0 +1,34 @@
+{
+  "name": "supahelp",
+  "version": "1.0.0",
+  "description": "A utility for importing, exporting, and querying Supabase databases",
+  "main": "supahelp",
+  "bin": {
+    "supahelp": "./supahelp"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "postinstall": "chmod +x ./supahelp"
+  },
+  "keywords": [
+    "supabase",
+    "postgresql",
+    "database",
+    "utility",
+    "cli"
+  ],
+  "author": "Wira Perdana <wira.perdana@gmail.com>",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wiraperdana/supahelp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wiraperdana/supahelp/issues"
+  },
+  "homepage": "https://github.com/wiraperdana/supahelp#readme",
+  "dependencies": {
+    "pg": "^8.15.6",
+    "pg-copy-streams": "^6.0.6"
+  }
+}
