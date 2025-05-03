@@ -161,8 +161,112 @@ async function importSQL(filePath) {
     }
 
     // Split the SQL file into individual statements
-    // This regex handles SQL statements that end with semicolons but ignores semicolons inside quotes
-    const statements = sqlContent.split(';').filter(stmt => stmt.trim().length > 0);
+    // This is a more robust approach to split SQL statements
+    // It handles semicolons inside quotes, comments, and dollar-quoted strings
+    const statements = [];
+    let currentStatement = '';
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inComment = false;
+    let inDollarQuote = false;
+    let dollarTag = '';
+
+    // Process the SQL file character by character
+    for (let i = 0; i < sqlContent.length; i++) {
+      const char = sqlContent[i];
+      const nextChar = sqlContent[i + 1] || '';
+
+      // Handle comments
+      if (!inSingleQuote && !inDoubleQuote && !inDollarQuote && char === '-' && nextChar === '-') {
+        inComment = true;
+        currentStatement += char;
+        continue;
+      }
+
+      // End of line terminates single-line comments
+      if (inComment && (char === '\n' || char === '\r')) {
+        inComment = false;
+        currentStatement += char;
+        continue;
+      }
+
+      // Skip processing if in a comment
+      if (inComment) {
+        currentStatement += char;
+        continue;
+      }
+
+      // Handle dollar-quoted strings (e.g., $$ or $tag$)
+      if (!inSingleQuote && !inDoubleQuote && char === '$') {
+        // Check if this is the start of a dollar quote
+        if (!inDollarQuote) {
+          // Look ahead to find the tag (if any)
+          let tag = '';
+          let j = i + 1;
+          while (j < sqlContent.length && sqlContent[j] !== '$' && /[a-zA-Z0-9_]/.test(sqlContent[j])) {
+            tag += sqlContent[j];
+            j++;
+          }
+
+          // If we found a closing $ after the tag, this is a dollar quote
+          if (j < sqlContent.length && sqlContent[j] === '$') {
+            inDollarQuote = true;
+            dollarTag = tag;
+            currentStatement += char; // Add the opening $
+            continue;
+          }
+        } else {
+          // Check if this is the end of the current dollar quote
+          let isClosing = true;
+          let j = i + 1;
+
+          // Check if the tag matches
+          for (let k = 0; k < dollarTag.length; k++) {
+            if (j + k >= sqlContent.length || sqlContent[j + k] !== dollarTag[k]) {
+              isClosing = false;
+              break;
+            }
+          }
+
+          // Check for the closing $
+          if (isClosing && j + dollarTag.length < sqlContent.length && sqlContent[j + dollarTag.length] === '$') {
+            inDollarQuote = false;
+            dollarTag = '';
+          }
+        }
+      }
+
+      // Handle quotes
+      if (!inDollarQuote && !inComment) {
+        if (char === "'" && !inDoubleQuote) {
+          // Toggle single quote state, but only if not escaped
+          if (i > 0 && sqlContent[i - 1] !== '\\') {
+            inSingleQuote = !inSingleQuote;
+          }
+        } else if (char === '"' && !inSingleQuote) {
+          // Toggle double quote state, but only if not escaped
+          if (i > 0 && sqlContent[i - 1] !== '\\') {
+            inDoubleQuote = !inDoubleQuote;
+          }
+        }
+      }
+
+      // Handle semicolons - only split on semicolons outside of quotes and dollar quotes
+      if (char === ';' && !inSingleQuote && !inDoubleQuote && !inDollarQuote && !inComment) {
+        // Add the current statement (without the semicolon) to the list
+        if (currentStatement.trim().length > 0) {
+          statements.push(currentStatement.trim());
+        }
+        currentStatement = '';
+      } else {
+        currentStatement += char;
+      }
+    }
+
+    // Add the last statement if there is one
+    if (currentStatement.trim().length > 0) {
+      statements.push(currentStatement.trim());
+    }
 
     // Execute each statement
     let successCount = 0;
@@ -177,27 +281,57 @@ async function importSQL(filePath) {
     let otherSuccessCount = 0;
 
     for (let i = 0; i < statements.length; i++) {
-      const stmt = statements[i].trim() + ';';
-      if (stmt.length <= 1 || stmt.startsWith('--')) continue;
+      // Add semicolon back to the statement if it doesn't already end with one
+      let stmt = statements[i].trim();
+      if (!stmt.endsWith(';')) {
+        stmt += ';';
+      }
+
+      // Skip empty statements and comments-only statements
+      if (stmt.length <= 1 || stmt.trim().startsWith('--')) continue;
 
       try {
+        // Handle special cases for better compatibility
+
+        // Handle SET statements which might not be supported in transactions
+        if (stmt.toUpperCase().startsWith('SET ') && !stmt.toUpperCase().includes('LOCAL')) {
+          console.log(`${colors.yellow}Skipping non-transactional SET statement: ${stmt.substring(0, 50)}...${colors.reset}`);
+          continue;
+        }
+
+        // Handle sequence reset statements
+        if (stmt.toUpperCase().includes('SETVAL')) {
+          try {
+            await client.query(stmt);
+            successCount++;
+            otherSuccessCount++;
+            continue;
+          } catch (seqErr) {
+            console.log(`${colors.yellow}Warning: Sequence reset failed, will try again after data import: ${seqErr.message}${colors.reset}`);
+            // Store for later execution after all other statements
+            continue;
+          }
+        }
+
+        // Execute the statement
         await client.query(stmt);
         successCount++;
 
-        // Count by statement type
-        if (stmt.toUpperCase().includes('INSERT INTO')) {
+        // Count by statement type (case insensitive matching)
+        const upperStmt = stmt.toUpperCase();
+        if (upperStmt.includes('INSERT INTO')) {
           insertSuccessCount++;
-        } else if (stmt.toUpperCase().includes('DELETE FROM')) {
+        } else if (upperStmt.includes('DELETE FROM')) {
           deleteSuccessCount++;
-        } else if (stmt.toUpperCase().includes('TRUNCATE TABLE')) {
+        } else if (upperStmt.includes('TRUNCATE TABLE')) {
           truncateSuccessCount++;
-        } else if (stmt.toUpperCase().includes('UPDATE ')) {
+        } else if (upperStmt.includes('UPDATE ')) {
           updateSuccessCount++;
-        } else if (stmt.toUpperCase().includes('CREATE TABLE')) {
+        } else if (upperStmt.includes('CREATE TABLE')) {
           createSuccessCount++;
-        } else if (stmt.toUpperCase().includes('DROP TABLE')) {
+        } else if (upperStmt.includes('DROP TABLE')) {
           dropSuccessCount++;
-        } else if (stmt.toUpperCase().includes('ALTER TABLE')) {
+        } else if (upperStmt.includes('ALTER TABLE')) {
           alterSuccessCount++;
         } else {
           otherSuccessCount++;
@@ -211,7 +345,8 @@ async function importSQL(filePath) {
         console.error(`${colors.red}Error executing statement ${i + 1}: ${err.message}${colors.reset}`);
 
         // Log the problematic statement for debugging
-        console.error(`${colors.dim}Statement: ${stmt.substring(0, 100)}...${colors.reset}`);
+        const stmtPreview = stmt.length > 100 ? stmt.substring(0, 100) + '...' : stmt;
+        console.error(`${colors.dim}Statement: ${stmtPreview}${colors.reset}`);
 
         // Ask whether to continue or rollback
         if (errorCount === 1) {
@@ -297,6 +432,8 @@ async function dumpDatabase(outputFile, options = {}) {
   }
 
   let client = null;
+  // Array to collect all foreign key constraints
+  let foreignKeys = [];
 
   try {
     // Connect to the database
@@ -334,8 +471,124 @@ async function dumpDatabase(outputFile, options = {}) {
         ORDER BY table_name
       `);
 
-      tables = tablesResult.rows.map(row => row.table_name);
-      console.log(`${colors.blue}Found ${tables.length} tables: ${tables.join(', ')}${colors.reset}`);
+      const allTables = tablesResult.rows.map(row => row.table_name);
+      console.log(`${colors.blue}Found ${allTables.length} tables: ${allTables.join(', ')}${colors.reset}`);
+
+      // Get foreign key dependencies to determine the correct order
+      console.log(`${colors.blue}Analyzing table dependencies for proper ordering...${colors.reset}`);
+
+      try {
+        // Get all foreign key relationships
+        const fkResult = await client.query(`
+          SELECT
+            tc.table_name,
+            ccu.table_name AS referenced_table
+          FROM
+            information_schema.table_constraints AS tc
+            JOIN information_schema.key_column_usage AS kcu
+              ON tc.constraint_name = kcu.constraint_name
+              AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage AS ccu
+              ON ccu.constraint_name = tc.constraint_name
+              AND ccu.table_schema = tc.table_schema
+          WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_schema = 'public'
+        `);
+
+        // Build dependency graph
+        const dependencies = {};
+        allTables.forEach(table => {
+          dependencies[table] = [];
+        });
+
+        fkResult.rows.forEach(row => {
+          if (row.table_name !== row.referenced_table) { // Avoid self-references
+            dependencies[row.table_name].push(row.referenced_table);
+          }
+        });
+
+        // Reverse the dependencies to get the correct order for creation
+        // We want referenced tables to come before tables that reference them
+        const reversedDependencies = {};
+        allTables.forEach(table => {
+          reversedDependencies[table] = [];
+        });
+
+        // Reverse the graph: if A depends on B, then B comes before A in our sort
+        fkResult.rows.forEach(row => {
+          if (row.table_name !== row.referenced_table) { // Avoid self-references
+            // If table A references table B, then B should come before A
+            if (reversedDependencies[row.referenced_table]) {
+              reversedDependencies[row.referenced_table].push(row.table_name);
+            }
+          }
+        });
+
+        console.log(`${colors.blue}Building dependency graph for proper table ordering...${colors.reset}`);
+
+        // Debug: Print the dependency graph
+        Object.keys(reversedDependencies).forEach(table => {
+          if (reversedDependencies[table].length > 0) {
+            console.log(`${colors.dim}${table} is referenced by: ${reversedDependencies[table].join(', ')}${colors.reset}`);
+          }
+        });
+
+        // Topological sort function to order tables based on dependencies
+        function topologicalSort(graph) {
+          const visited = {};
+          const temp = {};
+          const result = [];
+
+          function visit(node) {
+            if (temp[node]) {
+              // Circular dependency detected, but we'll still proceed
+              console.log(`${colors.yellow}Warning: Circular dependency detected involving table '${node}'${colors.reset}`);
+              return;
+            }
+
+            if (!visited[node]) {
+              temp[node] = true;
+
+              // Visit tables that depend on this table first
+              (graph[node] || []).forEach(dependent => {
+                if (graph[dependent]) { // Only visit if it's a valid node
+                  visit(dependent);
+                }
+              });
+
+              visited[node] = true;
+              temp[node] = false;
+              result.push(node); // Add to the end of the result
+            }
+          }
+
+          // Visit all nodes
+          Object.keys(graph).forEach(node => {
+            if (!visited[node]) {
+              visit(node);
+            }
+          });
+
+          return result;
+        }
+
+        // Sort tables based on dependencies
+        tables = topologicalSort(reversedDependencies);
+
+        // Make sure all tables are included (in case there are isolated tables)
+        allTables.forEach(table => {
+          if (!tables.includes(table)) {
+            tables.push(table);
+          }
+        });
+
+        console.log(`${colors.green}Tables ordered based on dependencies:${colors.reset}`);
+        console.log(`${colors.blue}${tables.join(' → ')}${colors.reset}`);
+      } catch (err) {
+        console.error(`${colors.yellow}Warning: Could not determine table dependencies: ${err.message}${colors.reset}`);
+        console.error(`${colors.yellow}Falling back to alphabetical order${colors.reset}`);
+        tables = allTables;
+      }
     }
 
     // Create the SQL file
@@ -351,14 +604,29 @@ async function dumpDatabase(outputFile, options = {}) {
     }
     writeStream.write(`-- Generated on ${new Date().toISOString()}\n\n`);
 
+    // Add option to disable foreign key constraints during import
+    writeStream.write('-- Disable foreign key constraints during import (uncomment to use)\n');
+    writeStream.write('-- SET session_replication_role = \'replica\';\n\n');
+
+    // Add transaction start
+    writeStream.write('-- Start transaction\n');
+    writeStream.write('BEGIN;\n\n');
+
     // Process each table
     for (const tableName of tables) {
       console.log(`${colors.yellow}Processing table: ${tableName}${colors.reset}`);
 
-      // Get the table structure
+      // Get the table structure with more detailed information
       const tableInfoResult = await client.query(`
-        SELECT column_name, data_type, character_maximum_length,
-               is_nullable, column_default
+        SELECT
+          column_name,
+          data_type,
+          character_maximum_length,
+          numeric_precision,
+          numeric_scale,
+          is_nullable,
+          column_default,
+          udt_name
         FROM information_schema.columns
         WHERE table_name = $1
         ORDER BY ordinal_position
@@ -374,12 +642,37 @@ async function dumpDatabase(outputFile, options = {}) {
       writeStream.write(`CREATE TABLE ${tableName} (\n`);
       tableInfoResult.rows.forEach((col, index) => {
         let dataType = col.data_type;
-        if (col.character_maximum_length) {
-          dataType += `(${col.character_maximum_length})`;
+
+        // Handle different data types properly
+        if (col.data_type === 'character varying' && col.character_maximum_length) {
+          dataType = `varchar(${col.character_maximum_length})`;
+        } else if (col.data_type === 'character' && col.character_maximum_length) {
+          dataType = `char(${col.character_maximum_length})`;
+        } else if (col.data_type === 'numeric' && col.numeric_precision !== null && col.numeric_scale !== null) {
+          dataType = `numeric(${col.numeric_precision}, ${col.numeric_scale})`;
+        } else if (col.data_type === 'ARRAY') {
+          // For array types, get the base type from udt_name
+          const baseType = col.udt_name.replace(/^_/, '');
+          dataType = `${baseType}[]`;
+        } else if (col.data_type === 'USER-DEFINED') {
+          // For custom types, use the UDT name
+          dataType = col.udt_name;
         }
 
         const nullable = col.is_nullable === 'YES' ? '' : ' NOT NULL';
-        const defaultVal = col.column_default ? ` DEFAULT ${col.column_default}` : '';
+
+        // Handle default values properly
+        let defaultVal = '';
+        if (col.column_default) {
+          // Check if it's a sequence for serial/identity columns
+          if (col.column_default.includes('nextval')) {
+            // For serial/identity columns, we'll handle the sequence separately
+            defaultVal = '';
+          } else {
+            defaultVal = ` DEFAULT ${col.column_default}`;
+          }
+        }
+
         const comma = index < tableInfoResult.rows.length - 1 ? ',' : '';
 
         writeStream.write(`  ${col.column_name} ${dataType}${nullable}${defaultVal}${comma}\n`);
@@ -404,6 +697,113 @@ async function dumpDatabase(outputFile, options = {}) {
         console.error(`${colors.red}Error getting primary key for ${tableName}: ${err.message}${colors.reset}`);
       }
 
+      // Collect foreign key constraints to add them at the end of the file
+      try {
+        const fkResult = await client.query(`
+          SELECT
+            tc.constraint_name,
+            tc.table_name,
+            kcu.column_name,
+            ccu.table_name AS foreign_table_name,
+            ccu.column_name AS foreign_column_name
+          FROM
+            information_schema.table_constraints AS tc
+            JOIN information_schema.key_column_usage AS kcu
+              ON tc.constraint_name = kcu.constraint_name
+              AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage AS ccu
+              ON ccu.constraint_name = tc.constraint_name
+              AND ccu.table_schema = tc.table_schema
+          WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = $1
+        `, [tableName]);
+
+        if (fkResult.rows.length > 0) {
+          // Store foreign key constraints to add them at the end
+          if (!foreignKeys) foreignKeys = [];
+
+          fkResult.rows.forEach(fk => {
+            foreignKeys.push({
+              tableName: fk.table_name,
+              constraintName: fk.constraint_name,
+              columnName: fk.column_name,
+              foreignTableName: fk.foreign_table_name,
+              foreignColumnName: fk.foreign_column_name
+            });
+          });
+        }
+      } catch (err) {
+        console.error(`${colors.red}Error getting foreign keys for ${tableName}: ${err.message}${colors.reset}`);
+      }
+
+      // Get sequence information for serial/identity columns
+      try {
+        const seqResult = await client.query(`
+          SELECT
+            pg_get_serial_sequence($1, a.attname) as sequence_name,
+            a.attname as column_name
+          FROM
+            pg_attribute a
+          WHERE
+            a.attrelid = $1::regclass
+            AND NOT a.attisdropped
+            AND pg_get_serial_sequence($1, a.attname) IS NOT NULL
+        `, [tableName]);
+
+        if (seqResult.rows.length > 0) {
+          writeStream.write(`-- Sequences for table: ${tableName}\n`);
+
+          for (const seq of seqResult.rows) {
+            if (seq.sequence_name) {
+              // Get sequence details
+              const seqDetailsResult = await client.query(`
+                SELECT
+                  sequence_name,
+                  data_type,
+                  start_value,
+                  minimum_value,
+                  maximum_value,
+                  increment,
+                  cycle_option
+                FROM information_schema.sequences
+                WHERE sequence_name = $1
+              `, [seq.sequence_name.split('.')[1]]);
+
+              if (seqDetailsResult.rows.length > 0) {
+                const seqDetails = seqDetailsResult.rows[0];
+
+                // Write CREATE SEQUENCE statement to ensure it exists
+                writeStream.write(`-- Create sequence if it doesn't exist\n`);
+                writeStream.write(`CREATE SEQUENCE IF NOT EXISTS ${seq.sequence_name}\n`);
+                writeStream.write(`  INCREMENT ${seqDetails.increment}\n`);
+                writeStream.write(`  MINVALUE ${seqDetails.minimum_value}\n`);
+                writeStream.write(`  MAXVALUE ${seqDetails.maximum_value}\n`);
+                writeStream.write(`  START ${seqDetails.start_value}\n`);
+                writeStream.write(`  ${seqDetails.cycle_option === 'YES' ? 'CYCLE' : 'NO CYCLE'};\n\n`);
+
+                // Get current value of sequence
+                const currvalResult = await client.query(`SELECT last_value, is_called FROM ${seq.sequence_name}`);
+                const lastValue = currvalResult.rows[0].last_value;
+                const isCalled = currvalResult.rows[0].is_called;
+
+                // Write sequence reset command
+                writeStream.write(`-- Set sequence value\n`);
+                writeStream.write(`SELECT pg_catalog.setval('${seq.sequence_name}', ${lastValue}, ${isCalled});\n\n`);
+
+                // Write sequence ownership
+                writeStream.write(`-- Set sequence ownership\n`);
+                writeStream.write(`ALTER SEQUENCE ${seq.sequence_name} OWNED BY ${tableName}.${seq.column_name};\n`);
+              }
+            }
+          }
+          writeStream.write('\n');
+        }
+      } catch (err) {
+        console.error(`${colors.red}Error getting sequence info for ${tableName}: ${err.message}${colors.reset}`);
+        // Write a comment about the error
+        writeStream.write(`-- Error getting sequence info for ${tableName}: ${err.message}\n`);
+        writeStream.write(`-- You may need to manually create and set sequences for this table\n\n`);
+      }
+
       // Get all data from the table (skip if schema-only)
       if (!options.schemaOnly) {
         try {
@@ -414,18 +814,63 @@ async function dumpDatabase(outputFile, options = {}) {
           if (dataResult.rows.length > 0) {
             writeStream.write(`-- Data for table: ${tableName}\n`);
 
+            // Get column types for proper formatting
+            const columnTypes = {};
+            tableInfoResult.rows.forEach(col => {
+              columnTypes[col.column_name] = {
+                dataType: col.data_type,
+                udtName: col.udt_name
+              };
+            });
+
             dataResult.rows.forEach(row => {
               const values = columns.map(col => {
                 const value = row[col];
+                const colType = columnTypes[col] || { dataType: 'unknown' };
+
                 if (value === null) return 'NULL';
-                if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`;
+
+                // Handle different data types
+                if (typeof value === 'string') {
+                  return `'${value.replace(/'/g, "''")}'`;
+                }
+
                 if (typeof value === 'object' && value instanceof Date) {
                   return `'${value.toISOString()}'`;
                 }
+
                 if (typeof value === 'object') {
+                  // Handle arrays
+                  if (Array.isArray(value)) {
+                    // Format array according to PostgreSQL syntax
+                    const arrayStr = JSON.stringify(value)
+                      .replace('[', '{')
+                      .replace(']', '}')
+                      .replace(/"/g, "'");
+                    return arrayStr;
+                  }
+
+                  // Handle JSON and JSONB
+                  if (colType.dataType === 'json' || colType.dataType === 'jsonb') {
+                    return `'${JSON.stringify(value).replace(/'/g, "''")}'::${colType.dataType}`;
+                  }
+
+                  // Handle other objects
                   return `'${JSON.stringify(value).replace(/'/g, "''")}'`;
                 }
-                return value;
+
+                // Handle boolean values
+                if (typeof value === 'boolean') {
+                  return value ? 'TRUE' : 'FALSE';
+                }
+
+                // Handle numeric values
+                if (typeof value === 'number') {
+                  return value;
+                }
+
+                // Default case
+                return `'${String(value).replace(/'/g, "''")}'`;
               });
 
               writeStream.write(`INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${values.join(', ')});\n`);
@@ -441,6 +886,37 @@ async function dumpDatabase(outputFile, options = {}) {
         console.log(`${colors.blue}Skipping data for ${tableName} (schema-only mode)${colors.reset}`);
       }
     }
+
+    // Write all foreign key constraints at the end
+    if (foreignKeys && foreignKeys.length > 0) {
+      writeStream.write('-- Foreign key constraints (added at the end to avoid dependency issues)\n');
+
+      // Group foreign keys by table for better organization
+      const fkByTable = {};
+      foreignKeys.forEach(fk => {
+        if (!fkByTable[fk.tableName]) {
+          fkByTable[fk.tableName] = [];
+        }
+        fkByTable[fk.tableName].push(fk);
+      });
+
+      // Write foreign key constraints for each table
+      Object.keys(fkByTable).forEach(tableName => {
+        writeStream.write(`-- Foreign key constraints for table: ${tableName}\n`);
+        fkByTable[tableName].forEach(fk => {
+          writeStream.write(`ALTER TABLE ${fk.tableName} ADD CONSTRAINT ${fk.constraintName} FOREIGN KEY (${fk.columnName}) REFERENCES ${fk.foreignTableName} (${fk.foreignColumnName});\n`);
+        });
+        writeStream.write('\n');
+      });
+    }
+
+    // Add transaction end and re-enable foreign key constraints
+    writeStream.write('-- Commit transaction\n');
+    writeStream.write('COMMIT;\n\n');
+
+    // Add option to re-enable foreign key constraints
+    writeStream.write('-- Re-enable foreign key constraints (uncomment if you disabled them above)\n');
+    writeStream.write('-- SET session_replication_role = \'origin\';\n\n');
 
     // Close the file
     writeStream.end();
