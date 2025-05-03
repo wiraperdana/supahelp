@@ -508,9 +508,91 @@ function askQuestion(question) {
 }
 
 /**
+ * Mask sensitive parts of a connection string
+ * @param {string} connString - The connection string to mask
+ * @returns {string} - The masked connection string
+ */
+function maskConnectionString(connString) {
+  if (!connString) return '';
+
+  try {
+    // Parse the connection string
+    // Format: postgresql://username:password@host:port/database
+    const regex = /^(postgresql:\/\/)([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)$/;
+    const match = connString.match(regex);
+
+    if (!match) return connString; // Return original if format doesn't match
+
+    const protocol = match[1];
+    const username = match[2];
+    const password = match[3];
+    const host = match[4];
+    const port = match[5];
+    const database = match[6];
+
+    // Mask the password (show only first and last character)
+    let maskedPassword;
+    if (password.length <= 4) {
+      maskedPassword = '*'.repeat(password.length);
+    } else {
+      maskedPassword = password.charAt(0) + '*'.repeat(password.length - 2) + password.charAt(password.length - 1);
+    }
+
+    // Mask only about 30% of the host
+    let maskedHost;
+    if (host.includes('.')) {
+      const parts = host.split('.');
+      if (parts.length >= 3) {
+        // For hosts like db.example.com
+        // Mask only a small portion of the middle part
+        const middlePart = parts[1];
+        const maskLength = Math.ceil(middlePart.length * 0.3); // Mask 30% of the middle part
+        const startPos = Math.floor((middlePart.length - maskLength) / 2);
+        const maskedMiddle = middlePart.substring(0, startPos) +
+                            '*'.repeat(maskLength) +
+                            middlePart.substring(startPos + maskLength);
+        maskedHost = parts[0] + '.' + maskedMiddle + '.' + parts[parts.length - 1];
+      } else if (parts.length === 2) {
+        // For hosts like example.com
+        // Mask only a small portion of the first part
+        const firstPart = parts[0];
+        const maskLength = Math.ceil(firstPart.length * 0.3); // Mask 30% of the first part
+        const startPos = Math.floor((firstPart.length - maskLength) / 2);
+        const maskedFirst = firstPart.substring(0, startPos) +
+                           '*'.repeat(maskLength) +
+                           firstPart.substring(startPos + maskLength);
+        maskedHost = maskedFirst + '.' + parts[1];
+      } else {
+        maskedHost = host;
+      }
+    } else {
+      // For IP addresses or simple hostnames, mask only 30% in the middle
+      if (host.length <= 4) {
+        maskedHost = host;
+      } else {
+        const maskLength = Math.ceil(host.length * 0.3); // Mask 30% of the host
+        const startPos = Math.floor((host.length - maskLength) / 2);
+        maskedHost = host.substring(0, startPos) +
+                    '*'.repeat(maskLength) +
+                    host.substring(startPos + maskLength);
+      }
+    }
+
+    // Reconstruct the masked connection string
+    return `${protocol}${username}:${maskedPassword}@${maskedHost}:${port}/${database}`;
+  } catch (err) {
+    // If any error occurs during masking, return the original string
+    return connString;
+  }
+}
+
+/**
  * Show help message
  */
 function showHelp() {
+  // Get masked connection string for display
+  const maskedConnString = maskConnectionString(connectionString);
+
   console.log(`
 ${colors.bright}Supabase Helper${colors.reset}
 A utility for importing and exporting data to/from Supabase
@@ -523,6 +605,7 @@ ${colors.bright}Commands:${colors.reset}
   ${colors.green}dump [options] [output_file.sql]${colors.reset}  Dump Supabase database to SQL file
   ${colors.green}query [options] <sql_query>${colors.reset}  Execute SQL query from string and display results
   ${colors.green}query [options] <file.sql>${colors.reset}  Execute SQL query from file and display results
+  ${colors.green}status${colors.reset}               Show connection status and information
   ${colors.green}help${colors.reset}                 Show this help message
 
 ${colors.bright}Options for dump:${colors.reset}
@@ -547,7 +630,7 @@ ${colors.bright}Examples:${colors.reset}
   supahelp query --csv query.sql
 
 ${colors.bright}Connection:${colors.reset}
-  Currently using: ${connectionString}
+  Currently using: ${maskedConnString}
   To change the connection string, set the SUPABASE_CONNECTION_STRING environment variable:
 
   ${colors.bright}Example:${colors.reset}
@@ -722,6 +805,94 @@ async function executeQuery(queryStringOrFile, options = {}) {
 }
 
 /**
+ * Show database connection status and information
+ */
+async function showStatus() {
+  // Get masked connection string for display
+  const maskedConnString = maskConnectionString(connectionString);
+
+  console.log(`
+${colors.bright}Supabase Connection Status${colors.reset}
+
+${colors.bright}Connection String:${colors.reset}
+  ${maskedConnString}
+`);
+
+  let client = null;
+
+  try {
+    // Connect to the database
+    client = await pool.connect();
+    console.log(`${colors.green}✓ Connected to Supabase database${colors.reset}`);
+
+    // Get database information
+    const versionResult = await client.query('SELECT version()');
+    const dbVersion = versionResult.rows[0].version;
+
+    // Get database size
+    const sizeResult = await client.query(`
+      SELECT pg_size_pretty(pg_database_size(current_database())) as size
+    `);
+    const dbSize = sizeResult.rows[0].size;
+
+    // Get table count
+    const tableCountResult = await client.query(`
+      SELECT COUNT(*) as count
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      AND table_type = 'BASE TABLE'
+    `);
+    const tableCount = tableCountResult.rows[0].count;
+
+    // Get top 5 tables by size
+    const tablesResult = await client.query(`
+      SELECT
+        table_name,
+        pg_size_pretty(pg_total_relation_size(quote_ident(table_name))) as size,
+        pg_total_relation_size(quote_ident(table_name)) as size_bytes
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      AND table_type = 'BASE TABLE'
+      ORDER BY pg_total_relation_size(quote_ident(table_name)) DESC
+      LIMIT 5
+    `);
+
+    console.log(`
+${colors.bright}Database Information:${colors.reset}
+  ${colors.blue}Version:${colors.reset} ${dbVersion.split(',')[0]}
+  ${colors.blue}Database Size:${colors.reset} ${dbSize}
+  ${colors.blue}Table Count:${colors.reset} ${tableCount}
+    `);
+
+    if (tablesResult.rows.length > 0) {
+      console.log(`${colors.bright}Top Tables by Size:${colors.reset}`);
+      tablesResult.rows.forEach(row => {
+        console.log(`  ${colors.blue}${row.table_name}:${colors.reset} ${row.size}`);
+      });
+    }
+
+  } catch (err) {
+    console.error(`${colors.red}Error connecting to database: ${err.message}${colors.reset}`);
+
+    // Check if it's a connection error
+    if (err.code === 'ECONNREFUSED' || err.code === '28P01' || err.code === '3D000' || err.message.includes('connect')) {
+      console.error(`${colors.yellow}Database connection error. Please check your connection settings.${colors.reset}`);
+      console.error(`${colors.yellow}To set the connection string, use the SUPABASE_CONNECTION_STRING environment variable:${colors.reset}`);
+      console.error(`${colors.yellow}export SUPABASE_CONNECTION_STRING='postgresql://postgres:password@your-supabase-host:5432/postgres'${colors.reset}`);
+      console.error(`${colors.yellow}Make sure your database is running and accessible.${colors.reset}`);
+    }
+
+    process.exit(1);
+  } finally {
+    if (client) {
+      client.release();
+    }
+
+    await pool.end();
+  }
+}
+
+/**
  * Main function
  */
 async function main() {
@@ -788,6 +959,9 @@ async function main() {
       }
       break;
     }
+    case 'status':
+      await showStatus();
+      break;
     default:
       console.error(`${colors.red}Unknown command: ${command}${colors.reset}`);
       showHelp();
