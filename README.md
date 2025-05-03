@@ -1,6 +1,6 @@
 # Supahelp - Supabase Helper
 
-A command-line utility for importing, exporting, and querying Supabase databases.
+A command-line utility for importing, exporting, and executing SQL statements on Supabase databases.
 
 ## Overview
 
@@ -8,7 +8,7 @@ A command-line utility for importing, exporting, and querying Supabase databases
 
 1. **Importing SQL files** into a Supabase database
 2. **Exporting (dumping)** a Supabase database to SQL files
-3. **Executing SQL queries** directly from the command line or from SQL files
+3. **Executing SQL statements** (SELECT, INSERT, UPDATE, DELETE, etc.) directly from the command line or from SQL files
 
 This tool is particularly useful for database migrations, backups, data management tasks, and ad-hoc queries.
 
@@ -112,11 +112,17 @@ supahelp dump [output_file.sql]
 # Export only the schema without data
 supahelp dump --schema-only [output_file.sql]
 
-# Execute SQL query directly from command line
-supahelp query "SELECT * FROM table_name LIMIT 10"
+# Execute SQL statements directly from command line
+supahelp execute "SELECT * FROM table_name LIMIT 10"
+supahelp execute "INSERT INTO table_name (column) VALUES ('value')"
+supahelp execute "UPDATE table_name SET column = 'new_value' WHERE id = 1"
+supahelp execute "DELETE FROM table_name WHERE id = 1"
 
-# Execute SQL query from a file
-supahelp query query.sql
+# Execute SQL statements from a file
+supahelp execute sql_file.sql
+
+# Show connection status and information
+supahelp status
 
 # Show help
 supahelp help
@@ -172,31 +178,43 @@ Features:
 - Option to export only the schema without data (--schema-only)
 - Option to export only a specific table (--table)
 
-### Executing Queries
+### Executing SQL Statements
 
-The query command allows you to execute SQL queries against your Supabase database:
+The execute command allows you to run any SQL statement against your Supabase database:
 
 ```bash
-# Execute a query directly from the command line
-supahelp query "SELECT * FROM siswa LIMIT 10"
+# Execute a SELECT query from the command line
+supahelp execute "SELECT * FROM siswa LIMIT 10"
 
-# Execute a query from a file
-supahelp query query.sql
+# Execute an INSERT statement
+supahelp execute "INSERT INTO siswa (nama, kelas_id, halaqoh_id, gender) VALUES ('Budi Santoso', 1, 1, 'laki-laki')"
 
-# Output results in CSV format
-supahelp query --csv "SELECT * FROM siswa LIMIT 10"
+# Execute an UPDATE statement
+supahelp execute "UPDATE siswa SET nama = 'Budi Setiawan' WHERE id = 1"
+
+# Execute a DELETE statement
+supahelp execute "DELETE FROM siswa WHERE id = 1"
+
+# Execute SQL statements from a file
+supahelp execute commands.sql
+
+# Output SELECT results in CSV format
+supahelp execute --csv "SELECT * FROM siswa LIMIT 10"
 
 # Output results from a file in CSV format
-supahelp query --csv query.sql
+supahelp execute --csv select_query.sql
 ```
 
 Features:
-- Execute SQL queries directly from the command line
-- Execute SQL queries from a file
-- Display results in a formatted table
-- Option to output results in CSV format (--csv)
-- Shows execution time and row count
+- Execute any SQL statement (SELECT, INSERT, UPDATE, DELETE, etc.) directly from the command line
+- Execute SQL statements from a file
+- Display SELECT results in a formatted table
+- Show affected row count for INSERT, UPDATE, DELETE statements
+- Option to output SELECT results in CSV format (--csv)
+- Shows execution time for all statements
 - Handles large result sets with column width truncation
+
+Note: The older `query` command is still available for backward compatibility but is deprecated. Please use `execute` instead.
 
 ## Examples
 
@@ -248,13 +266,13 @@ Then run:
 supahelp import truncate_table.sql
 ```
 
-### Example 4: Running Queries
+### Example 4: Executing SQL Statements
 
-#### Direct Query from Command Line
+#### SELECT Queries
 
 ```bash
 # Get the count of students by gender
-supahelp query "SELECT gender, COUNT(*) FROM siswa GROUP BY gender"
+supahelp execute "SELECT gender, COUNT(*) FROM siswa GROUP BY gender"
 ```
 
 This will:
@@ -262,7 +280,25 @@ This will:
 2. Execute the SQL query
 3. Display the results in a formatted table
 
-#### Query from a File
+#### INSERT, UPDATE, and DELETE Operations
+
+```bash
+# Insert a new student
+supahelp execute "INSERT INTO siswa (nama, kelas_id, halaqoh_id, gender) VALUES ('Budi Santoso', 1, 1, 'laki-laki')"
+
+# Update a student's information
+supahelp execute "UPDATE siswa SET nama = 'Budi Setiawan' WHERE nama = 'Budi Santoso'"
+
+# Delete a student
+supahelp execute "DELETE FROM siswa WHERE nama = 'Budi Setiawan'"
+```
+
+Each of these will:
+1. Connect to your Supabase database
+2. Execute the SQL statement
+3. Display the number of affected rows and execution time
+
+#### Executing SQL from a File
 
 Create a file named `student_report.sql` with the content:
 
@@ -285,20 +321,20 @@ LIMIT 20;
 Then run:
 
 ```bash
-supahelp query student_report.sql
+supahelp execute student_report.sql
 ```
 
 This will:
 1. Connect to your Supabase database
 2. Read the SQL file
-3. Execute the SQL query
+3. Execute the SQL statement
 4. Display the results in a formatted table
 
 #### Exporting Query Results to CSV
 
 ```bash
 # Export query results to CSV format
-supahelp query --csv "SELECT * FROM siswa" > students.csv
+supahelp execute --csv "SELECT * FROM siswa" > students.csv
 ```
 
 This will:
@@ -347,7 +383,7 @@ supahelp import prod_data.sql
 
 ```bash
 # Check for orphaned records
-supahelp query "
+supahelp execute "
   SELECT s.id, s.nama
   FROM siswa s
   LEFT JOIN halaqoh h ON s.halaqoh_id = h.id
@@ -355,7 +391,7 @@ supahelp query "
 "
 
 # Find duplicate records
-supahelp query "
+supahelp execute "
   SELECT nama, COUNT(*)
   FROM siswa
   GROUP BY nama
@@ -363,7 +399,7 @@ supahelp query "
 "
 
 # Get table statistics
-supahelp query "
+supahelp execute "
   SELECT
     table_name,
     pg_size_pretty(pg_total_relation_size(table_name::text)) as size,
@@ -378,7 +414,7 @@ supahelp query "
 
 ```bash
 # Create a student report and save as CSV
-supahelp query --csv "
+supahelp execute --csv "
   SELECT
     s.nama AS student_name,
     s.gender,
@@ -409,7 +445,7 @@ echo "
 " > submission_report.sql
 
 # Run the saved query
-supahelp query submission_report.sql
+supahelp execute submission_report.sql
 ```
 
 ## Troubleshooting
@@ -475,13 +511,13 @@ done
 echo "Export completed!"
 ```
 
-### Advanced Queries
+### Advanced SQL Operations
 
-You can use the query functionality for more complex database operations:
+You can use the execute command for more complex database operations:
 
 ```bash
 # Create a temporary table and query it
-supahelp query "
+supahelp execute "
   CREATE TEMPORARY TABLE temp_stats AS
   SELECT
     h.nama AS halaqoh_name,
@@ -498,7 +534,7 @@ supahelp query "
 "
 
 # Use SQL functions and window functions
-supahelp query "
+supahelp execute "
   SELECT
     s.nama,
     COUNT(st.id) AS setoran_count,
@@ -513,6 +549,27 @@ supahelp query "
   ORDER BY
     setoran_count DESC
   LIMIT 10;
+"
+
+# Perform database modifications
+supahelp execute "
+  -- Create a new table
+  CREATE TABLE IF NOT EXISTS report_summary (
+    id SERIAL PRIMARY KEY,
+    report_date DATE NOT NULL,
+    report_type VARCHAR(50) NOT NULL,
+    total_count INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  );
+
+  -- Insert summary data
+  INSERT INTO report_summary (report_date, report_type, total_count)
+  SELECT
+    CURRENT_DATE,
+    'Student Count',
+    COUNT(*)
+  FROM
+    siswa;
 "
 ```
 
@@ -560,7 +617,7 @@ LIMIT 20;
 Then run it with:
 
 ```bash
-supahelp query analysis.sql
+supahelp execute analysis.sql
 ```
 
 ### Handling Large Datasets

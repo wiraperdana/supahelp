@@ -1079,8 +1079,9 @@ ${colors.bright}Usage:${colors.reset}
 ${colors.bright}Commands:${colors.reset}
   ${colors.green}import <file.sql>${colors.reset}    Import SQL file to Supabase
   ${colors.green}dump [options] [output_file.sql]${colors.reset}  Dump Supabase database to SQL file
-  ${colors.green}query [options] <sql_query>${colors.reset}  Execute SQL query from string and display results
-  ${colors.green}query [options] <file.sql>${colors.reset}  Execute SQL query from file and display results
+  ${colors.green}execute [options] <sql_statement>${colors.reset}  Execute SQL statement (SELECT, INSERT, UPDATE, etc.)
+  ${colors.green}execute [options] <file.sql>${colors.reset}  Execute SQL statements from file
+  ${colors.green}query [options] <sql_query>${colors.reset}  (Deprecated) Use 'execute' instead
   ${colors.green}status${colors.reset}               Show connection status and information
   ${colors.green}help${colors.reset}                 Show this help message
 
@@ -1088,8 +1089,8 @@ ${colors.bright}Options for dump:${colors.reset}
   ${colors.green}--schema-only${colors.reset}        Dump only the database schema without data
   ${colors.green}--table <table_name>${colors.reset} Dump only the specified table
 
-${colors.bright}Options for query:${colors.reset}
-  ${colors.green}--csv${colors.reset}                Output results in CSV format
+${colors.bright}Options for execute:${colors.reset}
+  ${colors.green}--csv${colors.reset}                Output results in CSV format (for SELECT queries)
 
 ${colors.bright}Examples:${colors.reset}
   supahelp import siswa_data.sql
@@ -1100,10 +1101,12 @@ ${colors.bright}Examples:${colors.reset}
   supahelp dump --table siswa
   supahelp dump --table siswa siswa_backup.sql
   supahelp dump --table siswa --schema-only
-  supahelp query "SELECT * FROM siswa LIMIT 10"
-  supahelp query --csv "SELECT * FROM siswa LIMIT 10"
-  supahelp query query.sql
-  supahelp query --csv query.sql
+  supahelp execute "SELECT * FROM siswa LIMIT 10"
+  supahelp execute "INSERT INTO siswa (nama, kelas_id) VALUES ('Budi', 1)"
+  supahelp execute "UPDATE siswa SET nama = 'Budi Santoso' WHERE id = 1"
+  supahelp execute "DELETE FROM siswa WHERE id = 1"
+  supahelp execute --csv "SELECT * FROM siswa LIMIT 10"
+  supahelp execute sql_commands.sql
 
 ${colors.bright}Connection:${colors.reset}
   Currently using: ${maskedConnString}
@@ -1145,28 +1148,66 @@ async function readQueryFromFile(filePath) {
 }
 
 /**
- * Execute a SQL query and display the results
- * @param {string} queryStringOrFile - SQL query string or file path
- * @param {Object} options - Additional options
- * @param {boolean} options.csv - Whether to output in CSV format
- * @param {boolean} options.fromFile - Whether the query is from a file
+ * Determine the type of SQL statement
+ * @param {string} sql - SQL statement
+ * @returns {string} - Type of SQL statement (SELECT, INSERT, UPDATE, DELETE, etc.)
  */
-async function executeQuery(queryStringOrFile, options = {}) {
-  let queryString;
+function getSqlStatementType(sql) {
+  // Remove comments and trim whitespace
+  const cleanSql = sql
+    .replace(/--.*$/gm, '') // Remove single-line comments
+    .replace(/\/\*[\s\S]*?\*\//g, '') // Remove multi-line comments
+    .trim();
 
-  if (options.fromFile) {
-    // Read query from file
-    queryString = await readQueryFromFile(queryStringOrFile);
-    console.log(`${colors.blue}Loaded query from file: ${queryStringOrFile}${colors.reset}`);
-  } else {
-    // Use the provided query string
-    queryString = queryStringOrFile;
+  // Get the first word of the SQL statement (case-insensitive)
+  const firstWord = cleanSql.split(/\s+/)[0].toUpperCase();
+
+  // Common SQL statement types
+  const sqlTypes = [
+    'SELECT', 'INSERT', 'UPDATE', 'DELETE',
+    'CREATE', 'ALTER', 'DROP', 'TRUNCATE',
+    'GRANT', 'REVOKE', 'COMMIT', 'ROLLBACK',
+    'BEGIN', 'SET', 'EXPLAIN', 'ANALYZE',
+    'VACUUM', 'COPY', 'WITH'
+  ];
+
+  // Check if the first word matches a known SQL type
+  if (sqlTypes.includes(firstWord)) {
+    // Special case for WITH queries (common table expressions)
+    if (firstWord === 'WITH' && cleanSql.toUpperCase().includes('SELECT')) {
+      return 'SELECT';
+    }
+    return firstWord;
   }
 
-  if (!queryString) {
-    console.error(`${colors.red}Error: No SQL query specified${colors.reset}`);
-    console.log(`Usage: supahelp query "SELECT * FROM table_name"`);
-    console.log(`   or: supahelp query query.sql`);
+  // Default to 'UNKNOWN' if the type couldn't be determined
+  return 'UNKNOWN';
+}
+
+/**
+ * Execute a SQL statement and display the results (if any)
+ * @param {string} sqlStringOrFile - SQL statement string or file path
+ * @param {Object} options - Additional options
+ * @param {boolean} options.csv - Whether to output in CSV format
+ * @param {boolean} options.fromFile - Whether the SQL is from a file
+ */
+async function executeSQL(sqlStringOrFile, options = {}) {
+  let sqlString;
+
+  if (options.fromFile) {
+    // Read SQL from file
+    sqlString = await readQueryFromFile(sqlStringOrFile);
+    console.log(`${colors.blue}Loaded SQL from file: ${sqlStringOrFile}${colors.reset}`);
+  } else {
+    // Use the provided SQL string
+    sqlString = sqlStringOrFile;
+  }
+
+  if (!sqlString) {
+    console.error(`${colors.red}Error: No SQL statement specified${colors.reset}`);
+    console.log(`Usage: supahelp execute "SELECT * FROM table_name"`);
+    console.log(`   or: supahelp execute "INSERT INTO table_name (column) VALUES ('value')"`);
+    console.log(`   or: supahelp execute sql_file.sql`);
     process.exit(1);
   }
 
@@ -1177,22 +1218,43 @@ async function executeQuery(queryStringOrFile, options = {}) {
     client = await pool.connect();
     console.log(`${colors.green}Connected to Supabase database${colors.reset}`);
 
-    // Execute the query
-    console.log(`${colors.blue}Executing query...${colors.reset}`);
+    // Execute the SQL statement
+    console.log(`${colors.blue}Executing SQL statement...${colors.reset}`);
     const startTime = Date.now();
-    const result = await client.query(queryString);
+    const result = await client.query(sqlString);
     const endTime = Date.now();
     const executionTime = (endTime - startTime) / 1000;
 
-    // Display the results
-    if (result.rows.length === 0) {
-      console.log(`${colors.yellow}Query returned no rows${colors.reset}`);
-      console.log(`${colors.blue}Execution time: ${executionTime.toFixed(2)} seconds${colors.reset}`);
-      return;
-    }
+    // Determine the type of SQL statement
+    const sqlType = getSqlStatementType(sqlString);
 
-    console.log(`${colors.green}Query returned ${result.rows.length} rows${colors.reset}`);
-    console.log(`${colors.blue}Execution time: ${executionTime.toFixed(2)} seconds${colors.reset}`);
+    // Display appropriate message based on SQL statement type
+    if (sqlType === 'SELECT') {
+      // For SELECT statements, display the results
+      if (result.rows.length === 0) {
+        console.log(`${colors.yellow}Query returned no rows${colors.reset}`);
+        console.log(`${colors.blue}Execution time: ${executionTime.toFixed(2)} seconds${colors.reset}`);
+        return;
+      }
+
+      console.log(`${colors.green}Query returned ${result.rows.length} rows${colors.reset}`);
+      console.log(`${colors.blue}Execution time: ${executionTime.toFixed(2)} seconds${colors.reset}`);
+    } else {
+      // For other statements (INSERT, UPDATE, DELETE, etc.), show affected rows
+      const rowCount = result.rowCount || 0;
+      console.log(`${colors.green}${sqlType} statement executed successfully${colors.reset}`);
+
+      if (rowCount > 0) {
+        console.log(`${colors.green}Affected rows: ${rowCount}${colors.reset}`);
+      }
+
+      console.log(`${colors.blue}Execution time: ${executionTime.toFixed(2)} seconds${colors.reset}`);
+
+      // If it's not a SELECT statement, we don't need to display results
+      if (sqlType !== 'SELECT') {
+        return;
+      }
+    }
 
     // Get column names
     const columns = Object.keys(result.rows[0]);
@@ -1408,7 +1470,38 @@ async function main() {
       await dumpDatabase(outputFile, { schemaOnly, table });
       break;
     }
+    case 'execute': {
+      // Check for --csv flag
+      const csv = args.includes('--csv');
+      // Remove the flag from args if present to get the SQL statement
+      const sqlArgs = args.filter(arg => arg !== '--csv').slice(1);
+
+      if (sqlArgs.length === 0) {
+        console.error(`${colors.red}Error: No SQL statement or file specified${colors.reset}`);
+        console.log(`Usage: supahelp execute "SELECT * FROM table_name"`);
+        console.log(`   or: supahelp execute "INSERT INTO table_name (column) VALUES ('value')"`);
+        console.log(`   or: supahelp execute sql_file.sql`);
+        process.exit(1);
+      }
+
+      // Check if the first argument is a file path
+      const firstArg = sqlArgs[0];
+      const isFilePath = firstArg.endsWith('.sql') && sqlArgs.length === 1;
+
+      if (isFilePath) {
+        // Execute SQL from file
+        await executeSQL(firstArg, { csv, fromFile: true });
+      } else {
+        // Execute SQL from command line
+        const sqlString = sqlArgs.join(' ');
+        await executeSQL(sqlString, { csv, fromFile: false });
+      }
+      break;
+    }
+    // Keep 'query' command for backward compatibility
     case 'query': {
+      console.log(`${colors.yellow}Note: The 'query' command is deprecated. Please use 'execute' instead.${colors.reset}`);
+
       // Check for --csv flag
       const csv = args.includes('--csv');
       // Remove the flag from args if present to get the query
@@ -1416,8 +1509,9 @@ async function main() {
 
       if (queryArgs.length === 0) {
         console.error(`${colors.red}Error: No SQL query or file specified${colors.reset}`);
-        console.log(`Usage: supahelp query "SELECT * FROM table_name"`);
-        console.log(`   or: supahelp query query.sql`);
+        console.log(`Usage: supahelp execute "SELECT * FROM table_name"`);
+        console.log(`   or: supahelp execute "INSERT INTO table_name (column) VALUES ('value')"`);
+        console.log(`   or: supahelp execute sql_file.sql`);
         process.exit(1);
       }
 
@@ -1427,11 +1521,11 @@ async function main() {
 
       if (isFilePath) {
         // Execute query from file
-        await executeQuery(firstArg, { csv, fromFile: true });
+        await executeSQL(firstArg, { csv, fromFile: true });
       } else {
         // Execute query from command line
         const queryString = queryArgs.join(' ');
-        await executeQuery(queryString, { csv, fromFile: false });
+        await executeSQL(queryString, { csv, fromFile: false });
       }
       break;
     }
